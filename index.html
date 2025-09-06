@@ -1,0 +1,176 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>SynthAI Builder — Dashboard</title>
+  <style>
+    :root { --bg:#0b1220; --panel:#0e1526; --mut:#94a3b8; --border:#1f2937; --ok:#22c55e; --btn:#a78bfa; }
+    html,body { margin:0; background:var(--bg); color:#e2e8f0; font:14px ui-sans-serif, system-ui; }
+    .wrap { max-width:1100px; margin:24px auto; padding:0 12px; }
+    h1 { font-size:22px; margin:0 0 12px; }
+    .row { display:flex; gap:.75rem; flex-wrap:wrap; align-items:center; }
+    .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:12px; }
+    input,select,button,textarea {
+      background:#0f172a; border:1px solid var(--border); color:#e2e8f0; border-radius:8px; padding:8px;
+    }
+    button { background:var(--btn); color:#0b0b12; border:0; font-weight:700; cursor:pointer; }
+    pre { white-space:pre-wrap; background:#050915; border:1px solid var(--border); border-radius:8px; padding:8px; }
+    .mut { color:var(--mut); }
+    .pill { display:inline-block; padding:2px 8px; background:#101827; border-radius:999px; margin-right:6px; }
+    .grid { display:grid; gap:12px; grid-template-columns: repeat(auto-fit,minmax(320px,1fr)); }
+    .ok { color:var(--ok); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>SynthAI Builder — Netlify Frontend</h1>
+    <div class="row" style="margin-bottom:12px">
+      <span class="pill">Backend: <b id="backendStatus" class="mut">checking…</b></span>
+      <button id="btnPing">Ping API</button>
+      <a href="/phaser-demo/" style="margin-left:auto; color:#e2e8f0" title="Optional if you added it">Phaser demo →</a>
+    </div>
+
+    <div class="grid">
+      <!-- Projects -->
+      <section class="card">
+        <h3>Projects</h3>
+        <div class="row">
+          <input id="prName" placeholder="name" value="demo"/>
+          <select id="prType">
+            <option value="app">app</option>
+            <option value="game">game</option>
+          </select>
+          <button id="prCreate">Create</button>
+          <button id="prRefresh">Refresh</button>
+        </div>
+        <pre id="prList" style="margin-top:8px">[]</pre>
+        <div id="prLog" class="mut"></div>
+      </section>
+
+      <!-- Worldgen -->
+      <section class="card">
+        <h3>Game Worldgen</h3>
+        <div class="row">
+          <label>Cols <input id="wCols" type="number" value="16" min="4" max="64"/></label>
+          <label>Rows <input id="wRows" type="number" value="12" min="4" max="64"/></label>
+          <label>Seed <input id="wSeed" type="number" value="7" min="0"/></label>
+          <button id="wSave">Save to Notion</button>
+        </div>
+        <pre id="wJson" style="margin-top:8px">{}</pre>
+      </section>
+
+      <!-- Tests -->
+      <section class="card">
+        <h3>Tests (Collapse stub)</h3>
+        <p class="mut">Saves a test result (kind=<code>HC</code>) with a random score to Notion.</p>
+        <button id="tSubmit">Submit Test</button>
+        <div id="tLog" class="mut" style="margin-top:8px"></div>
+      </section>
+    </div>
+
+    <details class="card" style="margin-top:12px">
+      <summary>Debug</summary>
+      <pre id="debugOut" class="mut"></pre>
+    </details>
+  </div>
+
+  <script>
+    // ---------- Helper ----------
+    async function api(path, method='GET', body) {
+      const opt = { method, headers: { 'Content-Type':'application/json' } };
+      if (body) opt.body = JSON.stringify(body);
+      const r = await fetch(`/api/${path}`, opt);
+      const text = await r.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw:text }; }
+      if (!r.ok) throw new Error(typeof data === 'string' ? data : (data.error || text || r.status));
+      return data;
+    }
+
+    function worldgen(cols=30, rows=20, seed=42){
+      const tiles=[], h=(x,y)=>{ const s=`${x},${y},${seed}`; let n=0; for(let i=0;i<s.length;i++) n=(n*131+s.charCodeAt(i))>>>0; return (n&255)/255; };
+      for(let y=0;y<rows;y++){ const row=[]; for(let x=0;x<cols;x++){ const n=h(x,y); row.push(n>0.7?2:(n>0.45?1:0)); } tiles.push(row); }
+      return { cols, rows, tileSize:16, tiles, seed };
+    }
+
+    // ---------- State ----------
+    let projects = [];
+    function setDebug(o){ document.getElementById('debugOut').textContent = typeof o==='string'?o:JSON.stringify(o,null,2); }
+
+    // ---------- Backend ping ----------
+    async function ping(){
+      const el = document.getElementById('backendStatus');
+      try {
+        const r = await api('projects'); // GET should work even if DB empty
+        el.textContent = 'online';
+        el.classList.add('ok');
+        setDebug(r);
+      } catch (e) {
+        el.textContent = 'offline';
+        el.classList.remove('ok');
+        setDebug('Ping failed: '+ e.message);
+      }
+    }
+
+    // ---------- Projects ----------
+    async function refresh(){
+      const data = await api('projects');
+      projects = data.items || [];
+      document.getElementById('prList').textContent = JSON.stringify(projects,null,2);
+    }
+    async function create(){
+      const name = document.getElementById('prName').value.trim();
+      const type = document.getElementById('prType').value;
+      const log = document.getElementById('prLog');
+      if (!name){ log.textContent='name required'; return; }
+      const r = await api('projects','POST',{ name, type });
+      log.textContent = `created project ${r.id}`;
+      await refresh();
+    }
+
+    // ---------- Worldgen ----------
+    function updateWorldPreview(){
+      const cols=+document.getElementById('wCols').value;
+      const rows=+document.getElementById('wRows').value;
+      const seed=+document.getElementById('wSeed').value;
+      const w = worldgen(cols, rows, seed);
+      document.getElementById('wJson').textContent = JSON.stringify(w,null,2);
+      return w;
+    }
+    async function saveWorld(){
+      const log = document.getElementById('prLog');
+      if (!projects[0]){ log.textContent='create a project first'; return; }
+      const world = updateWorldPreview();
+      const r = await api('worlds','POST', { name:`world-${Date.now()}`, projectId: projects[0].id, world });
+      log.textContent = `saved world ${r.id}`;
+    }
+
+    // ---------- Tests ----------
+    async function submitTest(){
+      const log = document.getElementById('tLog');
+      if (!projects[0]){ log.textContent='create a project first'; return; }
+      const cols=+document.getElementById('wCols').value;
+      const rows=+document.getElementById('wRows').value;
+      const seed=+document.getElementById('wSeed').value;
+      const score = Math.round(Math.random()*100)/100;
+      const r = await api('tests','POST', { projectId: projects[0].id, user:'anon', kind:'HC', score, data:{seed,cols,rows} });
+      log.textContent = `saved test ${r.id}`;
+    }
+
+    // ---------- Wire ----------
+    document.getElementById('btnPing').onclick = ping;
+    document.getElementById('prRefresh').onclick = refresh;
+    document.getElementById('prCreate').onclick = create;
+    document.getElementById('wSave').onclick = saveWorld;
+    document.getElementById('tSubmit').onclick = submitTest;
+    ['wCols','wRows','wSeed'].forEach(id => {
+      document.getElementById(id).addEventListener('input', updateWorldPreview);
+    });
+
+    // Boot
+    updateWorldPreview();
+    ping().then(refresh);
+  </script>
+</body>
+</html>
